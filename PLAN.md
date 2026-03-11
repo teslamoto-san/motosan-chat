@@ -1,145 +1,146 @@
-# PLAN.md — motosan-chat 開發計畫
+# PLAN.md — motosan-chat Development Plan
 
-## v0.1 目標（第一版，Telegram only）
+## v0.1 Goal (Telegram only)
 
-讓一個 Telegram bot 能：
-1. 收到訊息
-2. 立刻回「思考中...」（Phase 1）
-3. 背景跑任意 async 任務（Phase 2）
-4. 結果 push 回去
+A working Telegram bot that:
+1. Receives a message
+2. Instantly replies "Got it, processing..." (Phase 1)
+3. Runs any async task in the background (Phase 2)
+4. Pushes the full result back to the user
 
 ---
 
-## Crate 清單
+## Crates
 
-### `motosan-core`（必須先做）
+### `motosan-core` (must be done first)
 
 ```
 src/
 ├── lib.rs
 ├── adapter.rs      # trait Adapter { reply, push, loading }
 ├── source.rs       # trait Source { next() -> IncomingEvent }
-├── event.rs        # struct IncomingEvent { user_id, reply_token, text, ... }
+├── event.rs        # struct IncomingEvent { user_id, reply_token, text, platform, ... }
 ├── thread.rs       # struct Thread { post(), push(), defer() }
 └── bot.rs          # struct Bot + BotBuilder + run()
 ```
 
-依賴：`tokio`, `tokio-util`, `async-trait`, `thiserror`
+Dependencies: `tokio`, `tokio-util`, `async-trait`, `thiserror`
 
 ---
 
-### `motosan-telegram`（第一個 adapter）
+### `motosan-telegram` (first adapter)
 
 ```
 src/
 ├── lib.rs
 ├── adapter.rs      # TelegramAdapter: impl Adapter
-│   ├── reply()     # sendMessage（用 chat_id）
-│   ├── push()      # sendMessage（同 reply，Telegram 沒差）
+│   ├── reply()     # sendMessage (chat_id — Telegram has no reply token)
+│   ├── push()      # sendMessage (same as reply on Telegram)
 │   └── loading()   # sendChatAction { action: "typing" }
 │
 └── polling.rs      # TelegramPolling: impl Source
-    └── next()      # getUpdates long-polling（offset 管理）
+    └── next()      # getUpdates long-polling (manages offset)
 ```
 
-依賴：`motosan-core`, `reqwest`, `serde_json`
+Dependencies: `motosan-core`, `reqwest`, `serde_json`
 
 ---
 
 ### `examples/hello-bot`
 
 ```rust
-// 最簡單的 demo：
-// 1. 收到訊息
-// 2. 立刻回「收到，處理中...」
-// 3. sleep 3 秒（模擬 LLM）
-// 4. push 完整回覆
+// Minimal demo:
+// 1. Receive a message
+// 2. Instantly reply "Got it, processing..."
+// 3. Sleep 3 seconds (simulate LLM)
+// 4. Push the full response
 ```
 
 ---
 
-## 實作順序
+## Implementation Order
 
 ```
 Step 1: motosan-core
   ├─ IncomingEvent struct
   ├─ trait Adapter
   ├─ trait Source
-  ├─ Thread struct（含 deferred Vec）
-  └─ Bot::run()（loop + TaskTracker + drain deferred）
+  ├─ Thread struct (deferred Vec inside)
+  └─ Bot::run() (loop + TaskTracker + drain deferred after handler)
 
 Step 2: motosan-telegram
-  ├─ TelegramPolling::next()（getUpdates）
-  └─ TelegramAdapter::reply/push/loading（sendMessage）
+  ├─ TelegramPolling::next() (getUpdates)
+  └─ TelegramAdapter::reply / push / loading (sendMessage)
 
 Step 3: examples/hello-bot
-  └─ 接起來，本機跑通
+  └─ Wire everything together and run locally
 ```
 
 ---
 
-## 關鍵設計決策
+## Key Design Decisions
 
-### Thread.defer() 的執行時機
+### How `defer()` works internally
 
 ```
-handler() 執行
+handler() executes
     │
-    ├─ thread.post("思考中...")   ← 同步，立刻打 API
-    └─ thread.defer(future)       ← 只是 push 進 Vec
+    ├─ thread.post("Got it...")   ← sync, calls API immediately
+    └─ thread.defer(future)       ← just pushes into internal Vec, returns instantly
 
-handler 返回
+handler returns
     │
-    ├─ Bot drain deferred Vec
-    └─ tracker.spawn(future)      ← 這時才真正執行
+    ├─ Bot drains the deferred Vec
+    └─ tracker.spawn(future)      ← background task starts here
 
-→ 使用者看不到這個細節
+→ Users never see this detail
 ```
 
-### Telegram 的 reply 等於 push
+### Telegram: reply == push
 
 ```
-Telegram 沒有「reply_token」概念，
-sendMessage 直接用 chat_id，任何時間都可以送。
-所以 Telegram 的 reply() 和 push() 實作相同。
-→ 不扣任何額度
-→ Phase 1 / Phase 2 都免費
+Telegram has no "reply_token" concept.
+sendMessage uses chat_id and works at any time.
+So TelegramAdapter::reply() and push() are identical.
+→ No quota consumed
+→ Phase 1 and Phase 2 are both free
 ```
 
 ---
 
-## 不在第一版的東西
+## Out of Scope for v0.1
 
-| 功能 | 版本 |
-|------|------|
+| Feature | Version |
+|---------|---------|
 | LINE adapter | v0.2 |
-| deduplication lock | v0.3 |
-| 對話歷史 | v0.4 |
+| Deduplication lock | v0.3 |
+| Conversation history | v0.4 |
 | Discord | v0.5 |
-| 多平台同時跑 | v0.5 |
+| Multiple platforms simultaneously | v0.5 |
 | Redis StateStore | v0.3+ |
 
 ---
 
-## 本機測試流程
+## Local Test Flow
 
 ```bash
-# 1. 從 @BotFather 拿 token
+# 1. Get a token from @BotFather on Telegram
 export TELEGRAM_TOKEN="123456:ABC..."
 
-# 2. 跑 example
+# 2. Run the example
 cargo run -p hello-bot
 
-# 3. 在 Telegram 傳訊息給 bot
-# 預期：立刻看到「收到，處理中...」，3 秒後看到完整回覆
+# 3. Send a message to your bot in Telegram
+# Expected: "Got it, processing..." appears instantly,
+#           full response appears ~3 seconds later
 ```
 
 ---
 
-## 成功標準（v0.1 done）
+## v0.1 Done Criteria
 
-- [ ] `cargo build -p motosan-core` 成功
-- [ ] `cargo build -p motosan-telegram` 成功
-- [ ] `cargo run -p hello-bot` 跑起來
-- [ ] Telegram 傳訊息，兩則回覆依序出現（Phase 1 → Phase 2）
-- [ ] Ctrl+C 優雅關機（TaskTracker 等背景任務完成）
+- [ ] `cargo build -p motosan-core` succeeds
+- [ ] `cargo build -p motosan-telegram` succeeds
+- [ ] `cargo run -p hello-bot` starts without errors
+- [ ] Sending a Telegram message triggers two sequential replies (Phase 1 → Phase 2)
+- [ ] Ctrl+C triggers graceful shutdown (TaskTracker waits for background tasks)
